@@ -84,11 +84,9 @@ pub const Settings = struct {
             return error.InvalidFrameLength;
         }
 
-        if (frame[3] != @intFromEnum(FrameType.settings)) {
-            return error.ProtocolError;
-        }
+        try validate_frame_type(.settings, frame);
 
-        const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
+        const payload_len = parse_payload_len(frame);
 
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
@@ -150,11 +148,9 @@ pub const Ping = struct {
             return error.InvalidFrameLength;
         }
 
-        if (frame[3] != @intFromEnum(FrameType.ping)) {
-            return error.ProtocolError;
-        }
+        try validate_frame_type(.ping, frame);
 
-        const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
+        const payload_len = parse_payload_len(frame);
 
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
@@ -190,11 +186,9 @@ pub const GoAway = struct {
             return error.InvalidFrameLength;
         }
 
-        if (frame[3] != @intFromEnum(FrameType.goaway)) {
-            return error.ProtocolError;
-        }
+        try validate_frame_type(.goaway, frame);
 
-        const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
+        const payload_len = parse_payload_len(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
@@ -231,6 +225,57 @@ pub const GoAway = struct {
         return self.frame[FRAME_LEN + FIXED_DATA_LEN ..];
     }
 };
+
+pub const RstStream = struct {
+    const DATA_LEN: usize = 4;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !RstStream {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validate_frame_type(.rst_stream, frame);
+
+        const payload_len = parse_payload_len(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (payload_len != DATA_LEN) {
+            return error.FrameSizeError;
+        }
+
+        if (parse_stream_id(frame) == 0) {
+            return error.ProtocolError;
+        }
+
+        return .{ .frame = frame };
+    }
+
+    pub fn stream_id(self: RstStream) u31 {
+        return parse_stream_id(self.frame);
+    }
+
+    pub fn error_code(self: RstStream) u32 {
+        return std.mem.readInt(
+            u32,
+            self.frame[FRAME_LEN..][0..DATA_LEN],
+            .big,
+        );
+    }
+};
+
+fn validate_frame_type(expected: FrameType, frame: []const u8) !void {
+    if (frame[3] != @intFromEnum(expected)) {
+        return error.ProtocolError;
+    }
+}
+
+fn parse_payload_len(frame: []const u8) usize {
+    return std.mem.readInt(u24, frame[0..3], .big);
+}
 
 fn parse_stream_id(payload: []const u8) u31 {
     const reserved_plus_stream_id = std.mem.readInt(u32, payload[5..9], .big);
@@ -632,4 +677,78 @@ test "goaway frame validation works" {
     try std.testing.expectError(error.FrameSizeError, GoAway.init(&short_payload));
     try std.testing.expectError(error.ProtocolError, GoAway.init(&wrong_type));
     try std.testing.expectError(error.ProtocolError, GoAway.init(&nonzero_stream));
+}
+
+test "rst_stream exposes stream and error code" {
+    const frame = [_]u8{
+        0x00, 0x00, 0x04,
+        0x03, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x08,
+    };
+    const frame_with_reserved_bit = [_]u8{
+        0x00, 0x00, 0x04,
+        0x03, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+        0xde, 0xad, 0xbe,
+        0xef,
+    };
+
+    const rst_stream = try RstStream.init(&frame);
+    try std.testing.expectEqual(@as(u31, 1), rst_stream.stream_id());
+    try std.testing.expectEqual(@as(u32, 0x0000_0008), rst_stream.error_code());
+
+    const rst_stream_with_reserved_bit = try RstStream.init(&frame_with_reserved_bit);
+    try std.testing.expectEqual(
+        @as(u31, 0x7fff_ffff),
+        rst_stream_with_reserved_bit.stream_id(),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0xdead_beef),
+        rst_stream_with_reserved_bit.error_code(),
+    );
+}
+
+test "rst_stream frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x03, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x03, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+    const wrong_payload_length = [_]u8{
+        0x00, 0x00, 0x03,
+        0x03, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x04,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+    const zero_stream = [_]u8{
+        0x00, 0x00, 0x04,
+        0x03, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, RstStream.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, RstStream.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, RstStream.init(&extra_payload));
+    try std.testing.expectError(error.FrameSizeError, RstStream.init(&wrong_payload_length));
+    try std.testing.expectError(error.ProtocolError, RstStream.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, RstStream.init(&zero_stream));
 }
