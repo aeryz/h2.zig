@@ -55,16 +55,19 @@ const Setting = struct {
     fn validate(self: Setting) !void {
         switch (self.identifier) {
             SETTINGS_ENABLE_PUSH => {
-                if (self.value > 1)
+                if (self.value > 1) {
                     return error.ProtocolError;
+                }
             },
             SETTINGS_INITIAL_WINDOW_SIZE => {
-                if (self.value > MAX_INITIAL_WINDOW_SIZE)
+                if (self.value > MAX_INITIAL_WINDOW_SIZE) {
                     return error.FlowControlError;
+                }
             },
             SETTINGS_MAX_FRAME_SIZE => {
-                if (self.value < MIN_MAX_FRAME_SIZE or self.value > MAX_MAX_FRAME_SIZE)
+                if (self.value < MIN_MAX_FRAME_SIZE or self.value > MAX_MAX_FRAME_SIZE) {
                     return error.ProtocolError;
+                }
             },
             else => {},
         }
@@ -77,26 +80,32 @@ pub const Settings = struct {
     frame: []const u8,
 
     pub fn init(frame: []const u8) !Settings {
-        if (frame.len < FRAME_LEN)
+        if (frame.len < FRAME_LEN) {
             return error.InvalidFrameLength;
+        }
+
+        if (frame[3] != @intFromEnum(FrameType.settings)) {
+            return error.ProtocolError;
+        }
 
         const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
 
-        if (frame[3] != @intFromEnum(FrameType.settings))
-            return error.ProtocolError;
-
-        if (frame.len != FRAME_LEN + payload_len)
+        if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
+        }
 
-        if (payload_len % Setting.RAW_LEN != 0)
+        if (payload_len % Setting.RAW_LEN != 0) {
             return error.InvalidSettingsLength;
+        }
 
-        if (parse_stream_id(frame) != 0)
+        if (parse_stream_id(frame) != 0) {
             return error.ProtocolError;
+        }
 
         const settings: Settings = .{ .frame = frame };
-        if (settings.is_ack() and payload_len != 0)
+        if (settings.is_ack() and payload_len != 0) {
             return error.FrameSizeError;
+        }
 
         return settings;
     }
@@ -114,8 +123,9 @@ pub const SettingsIterator = struct {
     remaining: []const u8,
 
     pub fn next(self: *SettingsIterator) !?Setting {
-        if (self.remaining.len == 0)
+        if (self.remaining.len == 0) {
             return null;
+        }
 
         const raw = self.remaining[0..Setting.RAW_LEN];
         self.remaining = self.remaining[Setting.RAW_LEN..];
@@ -129,19 +139,6 @@ pub const SettingsIterator = struct {
     }
 };
 
-// PING Frame {
-//   Length (24) = 0x08,
-//   Type (8) = 0x06,
-
-//   Unused Flags (7),
-//   ACK Flag (1),
-
-//   Reserved (1),
-//   Stream Identifier (31) = 0,
-
-//   Opaque Data (64),
-// }
-
 pub const Ping = struct {
     const FLAG_ACK: u8 = 0x01;
     const DATA_LEN: usize = 8;
@@ -149,22 +146,27 @@ pub const Ping = struct {
     frame: []const u8,
 
     pub fn init(frame: []const u8) !Ping {
-        if (frame.len < FRAME_LEN)
+        if (frame.len < FRAME_LEN) {
             return error.InvalidFrameLength;
+        }
+
+        if (frame[3] != @intFromEnum(FrameType.ping)) {
+            return error.ProtocolError;
+        }
 
         const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
 
-        if (frame[3] != @intFromEnum(FrameType.ping))
-            return error.ProtocolError;
-
-        if (frame.len != FRAME_LEN + payload_len)
+        if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
+        }
 
-        if (payload_len != DATA_LEN)
+        if (payload_len != DATA_LEN) {
             return error.FrameSizeError;
+        }
 
-        if (parse_stream_id(frame) != 0)
+        if (parse_stream_id(frame) != 0) {
             return error.ProtocolError;
+        }
 
         return .{ .frame = frame };
     }
@@ -175,6 +177,58 @@ pub const Ping = struct {
 
     pub fn data(self: Ping) *const [DATA_LEN]u8 {
         return self.frame[FRAME_LEN..][0..DATA_LEN];
+    }
+};
+
+pub const GoAway = struct {
+    const FIXED_DATA_LEN: usize = 8;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !GoAway {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        if (frame[3] != @intFromEnum(FrameType.goaway)) {
+            return error.ProtocolError;
+        }
+
+        const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (payload_len < FIXED_DATA_LEN) {
+            return error.FrameSizeError;
+        }
+
+        if (parse_stream_id(frame) != 0) {
+            return error.ProtocolError;
+        }
+
+        return .{ .frame = frame };
+    }
+
+    pub fn last_stream_id(self: GoAway) u31 {
+        const reserved_plus_stream_id = std.mem.readInt(
+            u32,
+            self.frame[FRAME_LEN..][0..4],
+            .big,
+        );
+        return @truncate(reserved_plus_stream_id & 0x7fff_ffff);
+    }
+
+    pub fn error_code(self: GoAway) u32 {
+        return std.mem.readInt(
+            u32,
+            self.frame[FRAME_LEN + 4 ..][0..4],
+            .big,
+        );
+    }
+
+    pub fn debug_data(self: GoAway) []const u8 {
+        return self.frame[FRAME_LEN + FIXED_DATA_LEN ..];
     }
 };
 
@@ -490,4 +544,92 @@ test "ping frame validation works" {
     try std.testing.expectError(error.FrameSizeError, Ping.init(&wrong_payload_length));
     try std.testing.expectError(error.ProtocolError, Ping.init(&wrong_type));
     try std.testing.expectError(error.ProtocolError, Ping.init(&nonzero_stream));
+}
+
+test "goaway exposes fixed fields and debug data" {
+    const frame = [_]u8{
+        0x00, 0x00, 0x08,
+        0x07, 0x00, 0x80,
+        0x00, 0x00, 0x00,
+        0x81, 0x02, 0x03,
+        0x04, 0x00, 0x00,
+        0x00, 0x08,
+    };
+    const debug_bytes = [_]u8{ 0x00, 0xff, 0x41, 0x42, 0x43 };
+    const frame_with_debug_data = [_]u8{
+        0x00, 0x00, 0x0d,
+        0x07, 0xa5, 0x00,
+        0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff,
+        0xff, 0xde, 0xad,
+        0xbe, 0xef,
+    } ++ debug_bytes;
+
+    const goaway = try GoAway.init(&frame);
+    try std.testing.expectEqual(@as(u31, 0x0102_0304), goaway.last_stream_id());
+    try std.testing.expectEqual(@as(u32, 0x0000_0008), goaway.error_code());
+    try std.testing.expectEqualSlices(u8, &.{}, goaway.debug_data());
+
+    const goaway_with_debug_data = try GoAway.init(&frame_with_debug_data);
+    try std.testing.expectEqual(
+        @as(u31, 0x7fff_ffff),
+        goaway_with_debug_data.last_stream_id(),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0xdead_beef),
+        goaway_with_debug_data.error_code(),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &debug_bytes,
+        goaway_with_debug_data.debug_data(),
+    );
+}
+
+test "goaway frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x08,
+        0x07, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x08,
+        0x07, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const short_payload = [_]u8{
+        0x00, 0x00, 0x07,
+        0x07, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x08,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+    const nonzero_stream = [_]u8{
+        0x00, 0x00, 0x08,
+        0x07, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, GoAway.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, GoAway.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, GoAway.init(&extra_payload));
+    try std.testing.expectError(error.FrameSizeError, GoAway.init(&short_payload));
+    try std.testing.expectError(error.ProtocolError, GoAway.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, GoAway.init(&nonzero_stream));
 }
