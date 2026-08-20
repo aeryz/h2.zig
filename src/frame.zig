@@ -31,9 +31,9 @@ pub const Settings = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.settings, frame);
+        try validateFrameType(.settings, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
 
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
@@ -43,19 +43,19 @@ pub const Settings = struct {
             return error.InvalidSettingsLength;
         }
 
-        if (parse_stream_id(frame) != 0) {
+        if (parseStreamId(frame) != 0) {
             return error.ProtocolError;
         }
 
         const settings: Settings = .{ .frame = frame };
-        if (settings.is_ack() and payload_len != 0) {
+        if (settings.isAck() and payload_len != 0) {
             return error.FrameSizeError;
         }
 
         return settings;
     }
 
-    pub fn is_ack(self: Settings) bool {
+    pub fn isAck(self: Settings) bool {
         return self.frame[4] & FLAG_ACK != 0;
     }
 
@@ -123,9 +123,9 @@ pub const Ping = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.ping, frame);
+        try validateFrameType(.ping, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
 
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
@@ -135,14 +135,14 @@ pub const Ping = struct {
             return error.FrameSizeError;
         }
 
-        if (parse_stream_id(frame) != 0) {
+        if (parseStreamId(frame) != 0) {
             return error.ProtocolError;
         }
 
         return .{ .frame = frame };
     }
 
-    pub fn is_ack(self: Ping) bool {
+    pub fn isAck(self: Ping) bool {
         return self.frame[4] & FLAG_ACK != 0;
     }
 
@@ -161,9 +161,9 @@ pub const GoAway = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.goaway, frame);
+        try validateFrameType(.goaway, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
@@ -172,14 +172,14 @@ pub const GoAway = struct {
             return error.FrameSizeError;
         }
 
-        if (parse_stream_id(frame) != 0) {
+        if (parseStreamId(frame) != 0) {
             return error.ProtocolError;
         }
 
         return .{ .frame = frame };
     }
 
-    pub fn last_stream_id(self: GoAway) u31 {
+    pub fn lastStreamId(self: GoAway) u31 {
         const reserved_plus_stream_id = std.mem.readInt(
             u32,
             self.frame[FRAME_LEN..][0..4],
@@ -188,7 +188,7 @@ pub const GoAway = struct {
         return @truncate(reserved_plus_stream_id & 0x7fff_ffff);
     }
 
-    pub fn error_code(self: GoAway) u32 {
+    pub fn errorCode(self: GoAway) u32 {
         return std.mem.readInt(
             u32,
             self.frame[FRAME_LEN + 4 ..][0..4],
@@ -196,7 +196,7 @@ pub const GoAway = struct {
         );
     }
 
-    pub fn debug_data(self: GoAway) []const u8 {
+    pub fn debugData(self: GoAway) []const u8 {
         return self.frame[FRAME_LEN + FIXED_DATA_LEN ..];
     }
 };
@@ -211,9 +211,9 @@ pub const RstStream = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.rst_stream, frame);
+        try validateFrameType(.rst_stream, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
@@ -222,18 +222,18 @@ pub const RstStream = struct {
             return error.FrameSizeError;
         }
 
-        if (parse_stream_id(frame) == 0) {
+        if (parseStreamId(frame) == 0) {
             return error.ProtocolError;
         }
 
         return .{ .frame = frame };
     }
 
-    pub fn stream_id(self: RstStream) u31 {
-        return parse_stream_id(self.frame);
+    pub fn streamId(self: RstStream) u31 {
+        return parseStreamId(self.frame);
     }
 
-    pub fn error_code(self: RstStream) u32 {
+    pub fn errorCode(self: RstStream) u32 {
         return std.mem.readInt(
             u32,
             self.frame[FRAME_LEN..][0..DATA_LEN],
@@ -252,9 +252,9 @@ pub const WindowUpdate = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.window_update, frame);
+        try validateFrameType(.window_update, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
@@ -271,8 +271,8 @@ pub const WindowUpdate = struct {
         return window_update;
     }
 
-    pub fn stream_id(self: WindowUpdate) u31 {
-        return parse_stream_id(self.frame);
+    pub fn streamId(self: WindowUpdate) u31 {
+        return parseStreamId(self.frame);
     }
 
     pub fn increment(self: WindowUpdate) u31 {
@@ -296,24 +296,24 @@ pub const Data = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.data, frame);
+        try validateFrameType(.data, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
 
-        if (parse_stream_id(frame) == 0) {
+        if (parseStreamId(frame) == 0) {
             return error.ProtocolError;
         }
 
         const data_frame: Data = .{ .frame = frame };
-        if (data_frame.is_padded()) {
+        if (data_frame.isPadded()) {
             if (payload_len == 0) {
                 return error.ProtocolError;
             }
 
-            if (data_frame.padding_len() >= payload_len) {
+            if (data_frame.paddingLen() >= payload_len) {
                 return error.ProtocolError;
             }
         }
@@ -321,29 +321,29 @@ pub const Data = struct {
         return data_frame;
     }
 
-    pub fn stream_id(self: Data) u31 {
-        return parse_stream_id(self.frame);
+    pub fn streamId(self: Data) u31 {
+        return parseStreamId(self.frame);
     }
 
-    pub fn is_end_stream(self: Data) bool {
+    pub fn isEndStream(self: Data) bool {
         return self.frame[4] & FLAG_END_STREAM != 0;
     }
 
-    pub fn is_padded(self: Data) bool {
+    pub fn isPadded(self: Data) bool {
         return self.frame[4] & FLAG_PADDED != 0;
     }
 
     pub fn data(self: Data) []const u8 {
-        if (!self.is_padded()) {
+        if (!self.isPadded()) {
             return self.frame[FRAME_LEN..];
         }
 
         const start = FRAME_LEN + 1;
-        const end = self.frame.len - self.padding_len();
+        const end = self.frame.len - self.paddingLen();
         return self.frame[start..end];
     }
 
-    fn padding_len(self: Data) usize {
+    fn paddingLen(self: Data) usize {
         return self.frame[FRAME_LEN];
     }
 };
@@ -368,29 +368,29 @@ pub const Headers = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.headers, frame);
+        try validateFrameType(.headers, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
 
-        if (parse_stream_id(frame) == 0) {
+        if (parseStreamId(frame) == 0) {
             return error.ProtocolError;
         }
 
         const headers: Headers = .{ .frame = frame };
-        const fields_len = headers.prefix_len();
+        const fields_len = headers.prefixLen();
         if (payload_len < fields_len) {
             return error.ProtocolError;
         }
 
-        if (headers.padding_len() > payload_len - fields_len) {
+        if (headers.paddingLen() > payload_len - fields_len) {
             return error.ProtocolError;
         }
 
         if (headers.priority()) |priority_info| {
-            if (priority_info.stream_dependency == headers.stream_id()) {
+            if (priority_info.stream_dependency == headers.streamId()) {
                 return error.ProtocolError;
             }
         }
@@ -398,32 +398,32 @@ pub const Headers = struct {
         return headers;
     }
 
-    pub fn stream_id(self: Headers) u31 {
-        return parse_stream_id(self.frame);
+    pub fn streamId(self: Headers) u31 {
+        return parseStreamId(self.frame);
     }
 
-    pub fn is_end_stream(self: Headers) bool {
+    pub fn isEndStream(self: Headers) bool {
         return self.frame[4] & FLAG_END_STREAM != 0;
     }
 
-    pub fn is_end_headers(self: Headers) bool {
+    pub fn isEndHeaders(self: Headers) bool {
         return self.frame[4] & FLAG_END_HEADERS != 0;
     }
 
-    pub fn is_padded(self: Headers) bool {
+    pub fn isPadded(self: Headers) bool {
         return self.frame[4] & FLAG_PADDED != 0;
     }
 
-    pub fn has_priority(self: Headers) bool {
+    pub fn hasPriority(self: Headers) bool {
         return self.frame[4] & FLAG_PRIORITY != 0;
     }
 
     pub fn priority(self: Headers) ?Priority {
-        if (!self.has_priority()) {
+        if (!self.hasPriority()) {
             return null;
         }
 
-        const offset = FRAME_LEN + self.padding_prefix_len();
+        const offset = FRAME_LEN + self.paddingPrefixLen();
         const exclusive_plus_dependency = std.mem.readInt(
             u32,
             self.frame[offset..][0..4],
@@ -437,32 +437,32 @@ pub const Headers = struct {
         };
     }
 
-    pub fn header_block_fragment(self: Headers) []const u8 {
-        const start = FRAME_LEN + self.prefix_len();
-        const end = self.frame.len - self.padding_len();
+    pub fn headerBlockFragment(self: Headers) []const u8 {
+        const start = FRAME_LEN + self.prefixLen();
+        const end = self.frame.len - self.paddingLen();
         return self.frame[start..end];
     }
 
-    fn prefix_len(self: Headers) usize {
-        return self.padding_prefix_len() + self.priority_prefix_len();
+    fn prefixLen(self: Headers) usize {
+        return self.paddingPrefixLen() + self.priorityPrefixLen();
     }
 
-    fn padding_prefix_len(self: Headers) usize {
-        if (self.is_padded()) {
+    fn paddingPrefixLen(self: Headers) usize {
+        if (self.isPadded()) {
             return 1;
         }
         return 0;
     }
 
-    fn priority_prefix_len(self: Headers) usize {
-        if (self.has_priority()) {
+    fn priorityPrefixLen(self: Headers) usize {
+        if (self.hasPriority()) {
             return PRIORITY_LEN;
         }
         return 0;
     }
 
-    fn padding_len(self: Headers) usize {
-        if (!self.is_padded()) {
+    fn paddingLen(self: Headers) usize {
+        if (!self.isPadded()) {
             return 0;
         }
         return self.frame[FRAME_LEN];
@@ -479,44 +479,44 @@ pub const Continuation = struct {
             return error.InvalidFrameLength;
         }
 
-        try validate_frame_type(.continuation, frame);
+        try validateFrameType(.continuation, frame);
 
-        const payload_len = parse_payload_len(frame);
+        const payload_len = parsePayloadLen(frame);
         if (frame.len != FRAME_LEN + payload_len) {
             return error.InvalidFrameLength;
         }
 
-        if (parse_stream_id(frame) == 0) {
+        if (parseStreamId(frame) == 0) {
             return error.ProtocolError;
         }
 
         return .{ .frame = frame };
     }
 
-    pub fn stream_id(self: Continuation) u31 {
-        return parse_stream_id(self.frame);
+    pub fn streamId(self: Continuation) u31 {
+        return parseStreamId(self.frame);
     }
 
-    pub fn is_end_headers(self: Continuation) bool {
+    pub fn isEndHeaders(self: Continuation) bool {
         return self.frame[4] & FLAG_END_HEADERS != 0;
     }
 
-    pub fn header_block_fragment(self: Continuation) []const u8 {
+    pub fn headerBlockFragment(self: Continuation) []const u8 {
         return self.frame[FRAME_LEN..];
     }
 };
 
-fn validate_frame_type(expected: FrameType, frame: []const u8) !void {
+fn validateFrameType(expected: FrameType, frame: []const u8) !void {
     if (frame[3] != @intFromEnum(expected)) {
         return error.ProtocolError;
     }
 }
 
-fn parse_payload_len(frame: []const u8) usize {
+fn parsePayloadLen(frame: []const u8) usize {
     return std.mem.readInt(u24, frame[0..3], .big);
 }
 
-fn parse_stream_id(payload: []const u8) u31 {
+fn parseStreamId(payload: []const u8) u31 {
     const reserved_plus_stream_id = std.mem.readInt(u32, payload[5..9], .big);
     return @truncate(reserved_plus_stream_id & 0x7fff_ffff);
 }
@@ -687,8 +687,8 @@ test "settings frame validation works" {
         0x00, 0x10, 0x00,
     };
 
-    try std.testing.expect(!(try Settings.init(&settings)).is_ack());
-    try std.testing.expect((try Settings.init(&settings_ack)).is_ack());
+    try std.testing.expect(!(try Settings.init(&settings)).isAck());
+    try std.testing.expect((try Settings.init(&settings_ack)).isAck());
     try std.testing.expectError(error.InvalidFrameLength, Settings.init(&too_short));
     try std.testing.expectError(error.InvalidFrameLength, Settings.init(&missing_payload));
     try std.testing.expectError(error.InvalidFrameLength, Settings.init(&extra_payload));
@@ -762,11 +762,11 @@ test "ping exposes acknowledgment and opaque data" {
     } ++ opaque_data;
 
     const ping = try Ping.init(&frame);
-    try std.testing.expect(!ping.is_ack());
+    try std.testing.expect(!ping.isAck());
     try std.testing.expectEqualSlices(u8, &opaque_data, ping.data());
 
     const ack = try Ping.init(&ack_frame);
-    try std.testing.expect(ack.is_ack());
+    try std.testing.expect(ack.isAck());
     try std.testing.expectEqualSlices(u8, &opaque_data, ack.data());
 }
 
@@ -838,23 +838,23 @@ test "goaway exposes fixed fields and debug data" {
     } ++ debug_bytes;
 
     const goaway = try GoAway.init(&frame);
-    try std.testing.expectEqual(@as(u31, 0x0102_0304), goaway.last_stream_id());
-    try std.testing.expectEqual(@as(u32, 0x0000_0008), goaway.error_code());
-    try std.testing.expectEqualSlices(u8, &.{}, goaway.debug_data());
+    try std.testing.expectEqual(@as(u31, 0x0102_0304), goaway.lastStreamId());
+    try std.testing.expectEqual(@as(u32, 0x0000_0008), goaway.errorCode());
+    try std.testing.expectEqualSlices(u8, &.{}, goaway.debugData());
 
     const goaway_with_debug_data = try GoAway.init(&frame_with_debug_data);
     try std.testing.expectEqual(
         @as(u31, 0x7fff_ffff),
-        goaway_with_debug_data.last_stream_id(),
+        goaway_with_debug_data.lastStreamId(),
     );
     try std.testing.expectEqual(
         @as(u32, 0xdead_beef),
-        goaway_with_debug_data.error_code(),
+        goaway_with_debug_data.errorCode(),
     );
     try std.testing.expectEqualSlices(
         u8,
         &debug_bytes,
-        goaway_with_debug_data.debug_data(),
+        goaway_with_debug_data.debugData(),
     );
 }
 
@@ -923,17 +923,17 @@ test "rst_stream exposes stream and error code" {
     };
 
     const rst_stream = try RstStream.init(&frame);
-    try std.testing.expectEqual(@as(u31, 1), rst_stream.stream_id());
-    try std.testing.expectEqual(@as(u32, 0x0000_0008), rst_stream.error_code());
+    try std.testing.expectEqual(@as(u31, 1), rst_stream.streamId());
+    try std.testing.expectEqual(@as(u32, 0x0000_0008), rst_stream.errorCode());
 
     const rst_stream_with_reserved_bit = try RstStream.init(&frame_with_reserved_bit);
     try std.testing.expectEqual(
         @as(u31, 0x7fff_ffff),
-        rst_stream_with_reserved_bit.stream_id(),
+        rst_stream_with_reserved_bit.streamId(),
     );
     try std.testing.expectEqual(
         @as(u32, 0xdead_beef),
-        rst_stream_with_reserved_bit.error_code(),
+        rst_stream_with_reserved_bit.errorCode(),
     );
 }
 
@@ -997,11 +997,11 @@ test "window_update exposes stream and increment" {
     };
 
     const connection_update = try WindowUpdate.init(&connection_update_frame);
-    try std.testing.expectEqual(@as(u31, 0), connection_update.stream_id());
+    try std.testing.expectEqual(@as(u31, 0), connection_update.streamId());
     try std.testing.expectEqual(@as(u31, 1), connection_update.increment());
 
     const stream_update = try WindowUpdate.init(&stream_update_frame);
-    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), stream_update.stream_id());
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), stream_update.streamId());
     try std.testing.expectEqual(@as(u31, 0x7fff_ffff), stream_update.increment());
 }
 
@@ -1075,18 +1075,18 @@ test "data exposes payload and flags" {
     };
 
     const empty_data = try Data.init(&empty_frame);
-    try std.testing.expectEqual(@as(u31, 1), empty_data.stream_id());
-    try std.testing.expect(!empty_data.is_end_stream());
-    try std.testing.expect(!empty_data.is_padded());
+    try std.testing.expectEqual(@as(u31, 1), empty_data.streamId());
+    try std.testing.expect(!empty_data.isEndStream());
+    try std.testing.expect(!empty_data.isPadded());
     try std.testing.expectEqualSlices(u8, &.{}, empty_data.data());
 
     const data = try Data.init(&frame);
     try std.testing.expectEqualSlices(u8, &payload, data.data());
 
     const padded_data = try Data.init(&padded_frame);
-    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), padded_data.stream_id());
-    try std.testing.expect(padded_data.is_end_stream());
-    try std.testing.expect(padded_data.is_padded());
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), padded_data.streamId());
+    try std.testing.expect(padded_data.isEndStream());
+    try std.testing.expect(padded_data.isPadded());
     try std.testing.expectEqualSlices(u8, &padded_payload, padded_data.data());
 
     const padded_empty_data = try Data.init(&padded_empty_frame);
@@ -1154,18 +1154,18 @@ test "headers exposes flags priority and header block fragment" {
     } ++ padded_fragment ++ [_]u8{ 0x00, 0x00 };
 
     const headers = try Headers.init(&frame);
-    try std.testing.expectEqual(@as(u31, 1), headers.stream_id());
-    try std.testing.expect(headers.is_end_stream());
-    try std.testing.expect(headers.is_end_headers());
-    try std.testing.expect(!headers.is_padded());
-    try std.testing.expect(!headers.has_priority());
+    try std.testing.expectEqual(@as(u31, 1), headers.streamId());
+    try std.testing.expect(headers.isEndStream());
+    try std.testing.expect(headers.isEndHeaders());
+    try std.testing.expect(!headers.isPadded());
+    try std.testing.expect(!headers.hasPriority());
     try std.testing.expectEqual(null, headers.priority());
-    try std.testing.expectEqualSlices(u8, &fragment, headers.header_block_fragment());
+    try std.testing.expectEqualSlices(u8, &fragment, headers.headerBlockFragment());
 
     const padded_headers = try Headers.init(&padded_priority_frame);
-    try std.testing.expectEqual(@as(u31, 5), padded_headers.stream_id());
-    try std.testing.expect(padded_headers.is_padded());
-    try std.testing.expect(padded_headers.has_priority());
+    try std.testing.expectEqual(@as(u31, 5), padded_headers.streamId());
+    try std.testing.expect(padded_headers.isPadded());
+    try std.testing.expect(padded_headers.hasPriority());
     try std.testing.expectEqual(
         Headers.Priority{
             .exclusive = true,
@@ -1177,7 +1177,7 @@ test "headers exposes flags priority and header block fragment" {
     try std.testing.expectEqualSlices(
         u8,
         &padded_fragment,
-        padded_headers.header_block_fragment(),
+        padded_headers.headerBlockFragment(),
     );
 }
 
@@ -1255,21 +1255,21 @@ test "continuation exposes flags and header block fragment" {
     } ++ fragment;
 
     const empty_continuation = try Continuation.init(&empty_frame);
-    try std.testing.expectEqual(@as(u31, 1), empty_continuation.stream_id());
-    try std.testing.expect(!empty_continuation.is_end_headers());
+    try std.testing.expectEqual(@as(u31, 1), empty_continuation.streamId());
+    try std.testing.expect(!empty_continuation.isEndHeaders());
     try std.testing.expectEqualSlices(
         u8,
         &.{},
-        empty_continuation.header_block_fragment(),
+        empty_continuation.headerBlockFragment(),
     );
 
     const continuation = try Continuation.init(&frame);
-    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), continuation.stream_id());
-    try std.testing.expect(continuation.is_end_headers());
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), continuation.streamId());
+    try std.testing.expect(continuation.isEndHeaders());
     try std.testing.expectEqualSlices(
         u8,
         &fragment,
-        continuation.header_block_fragment(),
+        continuation.headerBlockFragment(),
     );
 }
 
