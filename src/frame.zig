@@ -71,7 +71,7 @@ const Setting = struct {
     }
 };
 
-const Settings = struct {
+pub const Settings = struct {
     pub const FLAG_ACK: u8 = 0x01;
 
     frame: []const u8,
@@ -110,7 +110,7 @@ const Settings = struct {
     }
 };
 
-const SettingsIterator = struct {
+pub const SettingsIterator = struct {
     remaining: []const u8,
 
     pub fn next(self: *SettingsIterator) !?Setting {
@@ -126,6 +126,55 @@ const SettingsIterator = struct {
         };
         try setting.validate();
         return setting;
+    }
+};
+
+// PING Frame {
+//   Length (24) = 0x08,
+//   Type (8) = 0x06,
+
+//   Unused Flags (7),
+//   ACK Flag (1),
+
+//   Reserved (1),
+//   Stream Identifier (31) = 0,
+
+//   Opaque Data (64),
+// }
+
+pub const Ping = struct {
+    const FLAG_ACK: u8 = 0x01;
+    const DATA_LEN: usize = 8;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !Ping {
+        if (frame.len < FRAME_LEN)
+            return error.InvalidFrameLength;
+
+        const payload_len: usize = std.mem.readInt(u24, frame[0..3], .big);
+
+        if (frame[3] != @intFromEnum(FrameType.ping))
+            return error.ProtocolError;
+
+        if (frame.len != FRAME_LEN + payload_len)
+            return error.InvalidFrameLength;
+
+        if (payload_len != DATA_LEN)
+            return error.FrameSizeError;
+
+        if (parse_stream_id(frame) != 0)
+            return error.ProtocolError;
+
+        return .{ .frame = frame };
+    }
+
+    pub fn is_ack(self: Ping) bool {
+        return self.frame[4] & FLAG_ACK != 0;
+    }
+
+    pub fn data(self: Ping) *const [DATA_LEN]u8 {
+        return self.frame[FRAME_LEN..][0..DATA_LEN];
     }
 };
 
@@ -371,4 +420,74 @@ test "setting values are validated" {
         error.ProtocolError,
         parseOne(SETTINGS_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE + 1),
     );
+}
+
+test "ping exposes acknowledgment and opaque data" {
+    const opaque_data = [_]u8{ 0x00, 0x11, 0x22, 0x33, 0xaa, 0xbb, 0xcc, 0xdd };
+    const frame = [_]u8{
+        0x00, 0x00, 0x08,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    } ++ opaque_data;
+    const ack_frame = [_]u8{
+        0x00, 0x00, 0x08,
+        0x06, 0x01, 0x80,
+        0x00, 0x00, 0x00,
+    } ++ opaque_data;
+
+    const ping = try Ping.init(&frame);
+    try std.testing.expect(!ping.is_ack());
+    try std.testing.expectEqualSlices(u8, &opaque_data, ping.data());
+
+    const ack = try Ping.init(&ack_frame);
+    try std.testing.expect(ack.is_ack());
+    try std.testing.expectEqualSlices(u8, &opaque_data, ack.data());
+}
+
+test "ping frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_data = [_]u8{
+        0x00, 0x00, 0x08,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const extra_data = [_]u8{
+        0x00, 0x00, 0x08,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const wrong_payload_length = [_]u8{
+        0x00, 0x00, 0x07,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x08,
+        0x04, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+    const nonzero_stream = [_]u8{
+        0x00, 0x00, 0x08,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, Ping.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, Ping.init(&missing_data));
+    try std.testing.expectError(error.InvalidFrameLength, Ping.init(&extra_data));
+    try std.testing.expectError(error.FrameSizeError, Ping.init(&wrong_payload_length));
+    try std.testing.expectError(error.ProtocolError, Ping.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, Ping.init(&nonzero_stream));
 }
