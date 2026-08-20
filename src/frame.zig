@@ -1,12 +1,5 @@
 const std = @import("std");
 
-/// This setting indicates the size of the largest frame payload that the sender is willing to
-/// receive, in units of octets.
-///
-/// The initial value is 214 (16,384) octets. The value advertised by an endpoint
-/// MUST be between this initial value and the maximum allowed frame size
-/// (224-1 or 16,777,215 octets), inclusive. Values outside this range MUST be
-/// treated as a connection error (Section 5.4.1) of type PROTOCOL_ERROR.
 const SETTINGS_ENABLE_PUSH: u16 = 0x2;
 const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
 const SETTINGS_MAX_FRAME_SIZE: u16 = 0x5;
@@ -26,52 +19,6 @@ const FrameType = enum(u8) {
     goaway = 0x7,
     window_update = 0x8,
     continuation = 0x9,
-
-    pub fn fromU8(raw: u8) ?FrameType {
-        if (raw <= @intFromEnum(FrameType.continuation)) {
-            return @enumFromInt(raw);
-        } else {
-            return null;
-        }
-    }
-};
-
-// const FrameHeader = packed struct {
-//     pub const RAW_LEN: usize = 9;
-//     /// Frame-payload length
-//     length: u24,
-//     type: FrameType,
-//     /// An 8-bit field reserved for boolean flags specific to the frame type.
-//     flags: u8,
-//     _reserved: u1 = 0,
-//     stream_identifier: u31,
-
-const Setting = struct {
-    pub const RAW_LEN: usize = 6;
-
-    identifier: u16,
-    value: u32,
-
-    fn validate(self: Setting) !void {
-        switch (self.identifier) {
-            SETTINGS_ENABLE_PUSH => {
-                if (self.value > 1) {
-                    return error.ProtocolError;
-                }
-            },
-            SETTINGS_INITIAL_WINDOW_SIZE => {
-                if (self.value > MAX_INITIAL_WINDOW_SIZE) {
-                    return error.FlowControlError;
-                }
-            },
-            SETTINGS_MAX_FRAME_SIZE => {
-                if (self.value < MIN_MAX_FRAME_SIZE or self.value > MAX_MAX_FRAME_SIZE) {
-                    return error.ProtocolError;
-                }
-            },
-            else => {},
-        }
-    }
 };
 
 pub const Settings = struct {
@@ -134,6 +81,34 @@ pub const SettingsIterator = struct {
         };
         try setting.validate();
         return setting;
+    }
+};
+
+pub const Setting = struct {
+    pub const RAW_LEN: usize = 6;
+
+    identifier: u16,
+    value: u32,
+
+    fn validate(self: Setting) !void {
+        switch (self.identifier) {
+            SETTINGS_ENABLE_PUSH => {
+                if (self.value > 1) {
+                    return error.ProtocolError;
+                }
+            },
+            SETTINGS_INITIAL_WINDOW_SIZE => {
+                if (self.value > MAX_INITIAL_WINDOW_SIZE) {
+                    return error.FlowControlError;
+                }
+            },
+            SETTINGS_MAX_FRAME_SIZE => {
+                if (self.value < MIN_MAX_FRAME_SIZE or self.value > MAX_MAX_FRAME_SIZE) {
+                    return error.ProtocolError;
+                }
+            },
+            else => {},
+        }
     }
 };
 
@@ -267,6 +242,270 @@ pub const RstStream = struct {
     }
 };
 
+pub const WindowUpdate = struct {
+    const DATA_LEN: usize = 4;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !WindowUpdate {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validate_frame_type(.window_update, frame);
+
+        const payload_len = parse_payload_len(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (payload_len != DATA_LEN) {
+            return error.FrameSizeError;
+        }
+
+        const window_update: WindowUpdate = .{ .frame = frame };
+        if (window_update.increment() == 0) {
+            return error.ProtocolError;
+        }
+
+        return window_update;
+    }
+
+    pub fn stream_id(self: WindowUpdate) u31 {
+        return parse_stream_id(self.frame);
+    }
+
+    pub fn increment(self: WindowUpdate) u31 {
+        const reserved_plus_increment = std.mem.readInt(
+            u32,
+            self.frame[FRAME_LEN..][0..DATA_LEN],
+            .big,
+        );
+        return @truncate(reserved_plus_increment & 0x7fff_ffff);
+    }
+};
+
+pub const Data = struct {
+    const FLAG_END_STREAM: u8 = 0x01;
+    const FLAG_PADDED: u8 = 0x08;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !Data {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validate_frame_type(.data, frame);
+
+        const payload_len = parse_payload_len(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (parse_stream_id(frame) == 0) {
+            return error.ProtocolError;
+        }
+
+        const data_frame: Data = .{ .frame = frame };
+        if (data_frame.is_padded()) {
+            if (payload_len == 0) {
+                return error.ProtocolError;
+            }
+
+            if (data_frame.padding_len() >= payload_len) {
+                return error.ProtocolError;
+            }
+        }
+
+        return data_frame;
+    }
+
+    pub fn stream_id(self: Data) u31 {
+        return parse_stream_id(self.frame);
+    }
+
+    pub fn is_end_stream(self: Data) bool {
+        return self.frame[4] & FLAG_END_STREAM != 0;
+    }
+
+    pub fn is_padded(self: Data) bool {
+        return self.frame[4] & FLAG_PADDED != 0;
+    }
+
+    pub fn data(self: Data) []const u8 {
+        if (!self.is_padded()) {
+            return self.frame[FRAME_LEN..];
+        }
+
+        const start = FRAME_LEN + 1;
+        const end = self.frame.len - self.padding_len();
+        return self.frame[start..end];
+    }
+
+    fn padding_len(self: Data) usize {
+        return self.frame[FRAME_LEN];
+    }
+};
+
+pub const Headers = struct {
+    const FLAG_END_STREAM: u8 = 0x01;
+    const FLAG_END_HEADERS: u8 = 0x04;
+    const FLAG_PADDED: u8 = 0x08;
+    const FLAG_PRIORITY: u8 = 0x20;
+    const PRIORITY_LEN: usize = 5;
+
+    pub const Priority = struct {
+        exclusive: bool,
+        stream_dependency: u31,
+        weight: u16,
+    };
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !Headers {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validate_frame_type(.headers, frame);
+
+        const payload_len = parse_payload_len(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (parse_stream_id(frame) == 0) {
+            return error.ProtocolError;
+        }
+
+        const headers: Headers = .{ .frame = frame };
+        const fields_len = headers.prefix_len();
+        if (payload_len < fields_len) {
+            return error.ProtocolError;
+        }
+
+        if (headers.padding_len() > payload_len - fields_len) {
+            return error.ProtocolError;
+        }
+
+        if (headers.priority()) |priority_info| {
+            if (priority_info.stream_dependency == headers.stream_id()) {
+                return error.ProtocolError;
+            }
+        }
+
+        return headers;
+    }
+
+    pub fn stream_id(self: Headers) u31 {
+        return parse_stream_id(self.frame);
+    }
+
+    pub fn is_end_stream(self: Headers) bool {
+        return self.frame[4] & FLAG_END_STREAM != 0;
+    }
+
+    pub fn is_end_headers(self: Headers) bool {
+        return self.frame[4] & FLAG_END_HEADERS != 0;
+    }
+
+    pub fn is_padded(self: Headers) bool {
+        return self.frame[4] & FLAG_PADDED != 0;
+    }
+
+    pub fn has_priority(self: Headers) bool {
+        return self.frame[4] & FLAG_PRIORITY != 0;
+    }
+
+    pub fn priority(self: Headers) ?Priority {
+        if (!self.has_priority()) {
+            return null;
+        }
+
+        const offset = FRAME_LEN + self.padding_prefix_len();
+        const exclusive_plus_dependency = std.mem.readInt(
+            u32,
+            self.frame[offset..][0..4],
+            .big,
+        );
+
+        return .{
+            .exclusive = exclusive_plus_dependency & 0x8000_0000 != 0,
+            .stream_dependency = @truncate(exclusive_plus_dependency & 0x7fff_ffff),
+            .weight = @as(u16, self.frame[offset + 4]) + 1,
+        };
+    }
+
+    pub fn header_block_fragment(self: Headers) []const u8 {
+        const start = FRAME_LEN + self.prefix_len();
+        const end = self.frame.len - self.padding_len();
+        return self.frame[start..end];
+    }
+
+    fn prefix_len(self: Headers) usize {
+        return self.padding_prefix_len() + self.priority_prefix_len();
+    }
+
+    fn padding_prefix_len(self: Headers) usize {
+        if (self.is_padded()) {
+            return 1;
+        }
+        return 0;
+    }
+
+    fn priority_prefix_len(self: Headers) usize {
+        if (self.has_priority()) {
+            return PRIORITY_LEN;
+        }
+        return 0;
+    }
+
+    fn padding_len(self: Headers) usize {
+        if (!self.is_padded()) {
+            return 0;
+        }
+        return self.frame[FRAME_LEN];
+    }
+};
+
+pub const Continuation = struct {
+    const FLAG_END_HEADERS: u8 = 0x04;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !Continuation {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validate_frame_type(.continuation, frame);
+
+        const payload_len = parse_payload_len(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (parse_stream_id(frame) == 0) {
+            return error.ProtocolError;
+        }
+
+        return .{ .frame = frame };
+    }
+
+    pub fn stream_id(self: Continuation) u31 {
+        return parse_stream_id(self.frame);
+    }
+
+    pub fn is_end_headers(self: Continuation) bool {
+        return self.frame[4] & FLAG_END_HEADERS != 0;
+    }
+
+    pub fn header_block_fragment(self: Continuation) []const u8 {
+        return self.frame[FRAME_LEN..];
+    }
+};
+
 fn validate_frame_type(expected: FrameType, frame: []const u8) !void {
     if (frame[3] != @intFromEnum(expected)) {
         return error.ProtocolError;
@@ -281,18 +520,6 @@ fn parse_stream_id(payload: []const u8) u31 {
     const reserved_plus_stream_id = std.mem.readInt(u32, payload[5..9], .big);
     return @truncate(reserved_plus_stream_id & 0x7fff_ffff);
 }
-
-// Order of impl
-// ---------------
-// SETTINGS
-// PING
-// GOAWAY
-// RST_STREAM
-// WINDOW_UPDATE
-// DATA
-// HEADERS
-// CONTINUATION
-// ---------------
 
 test "setting iteration works" {
     const zero_settings = [_]u8{
@@ -751,4 +978,328 @@ test "rst_stream frame validation works" {
     try std.testing.expectError(error.FrameSizeError, RstStream.init(&wrong_payload_length));
     try std.testing.expectError(error.ProtocolError, RstStream.init(&wrong_type));
     try std.testing.expectError(error.ProtocolError, RstStream.init(&zero_stream));
+}
+
+test "window_update exposes stream and increment" {
+    const connection_update_frame = [_]u8{
+        0x00, 0x00, 0x04,
+        0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x01,
+    };
+    const stream_update_frame = [_]u8{
+        0x00, 0x00, 0x04,
+        0x08, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+        0xff,
+    };
+
+    const connection_update = try WindowUpdate.init(&connection_update_frame);
+    try std.testing.expectEqual(@as(u31, 0), connection_update.stream_id());
+    try std.testing.expectEqual(@as(u31, 1), connection_update.increment());
+
+    const stream_update = try WindowUpdate.init(&stream_update_frame);
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), stream_update.stream_id());
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), stream_update.increment());
+}
+
+test "window_update frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x01, 0x00,
+    };
+    const wrong_payload_length = [_]u8{
+        0x00, 0x00, 0x03,
+        0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x04,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x01,
+    };
+    const zero_increment = [_]u8{
+        0x00, 0x00, 0x04,
+        0x08, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x80, 0x00, 0x00,
+        0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, WindowUpdate.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, WindowUpdate.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, WindowUpdate.init(&extra_payload));
+    try std.testing.expectError(error.FrameSizeError, WindowUpdate.init(&wrong_payload_length));
+    try std.testing.expectError(error.ProtocolError, WindowUpdate.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, WindowUpdate.init(&zero_increment));
+}
+
+test "data exposes payload and flags" {
+    const empty_frame = [_]u8{
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const payload = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const frame = [_]u8{
+        0x00, 0x00, 0x04,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    } ++ payload;
+    const padded_payload = [_]u8{ 0xaa, 0xbb };
+    const padded_frame = [_]u8{
+        0x00, 0x00, 0x06,
+        0x00, 0x09, 0xff,
+        0xff, 0xff, 0xff,
+        0x03,
+    } ++ padded_payload ++ [_]u8{ 0x00, 0x00, 0x00 };
+    const padded_empty_frame = [_]u8{
+        0x00, 0x00, 0x02,
+        0x00, 0x08, 0x00,
+        0x00, 0x00, 0x03,
+        0x01, 0x00,
+    };
+
+    const empty_data = try Data.init(&empty_frame);
+    try std.testing.expectEqual(@as(u31, 1), empty_data.stream_id());
+    try std.testing.expect(!empty_data.is_end_stream());
+    try std.testing.expect(!empty_data.is_padded());
+    try std.testing.expectEqualSlices(u8, &.{}, empty_data.data());
+
+    const data = try Data.init(&frame);
+    try std.testing.expectEqualSlices(u8, &payload, data.data());
+
+    const padded_data = try Data.init(&padded_frame);
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), padded_data.stream_id());
+    try std.testing.expect(padded_data.is_end_stream());
+    try std.testing.expect(padded_data.is_padded());
+    try std.testing.expectEqualSlices(u8, &padded_payload, padded_data.data());
+
+    const padded_empty_data = try Data.init(&padded_empty_frame);
+    try std.testing.expectEqualSlices(u8, &.{}, padded_empty_data.data());
+}
+
+test "data frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x00,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const zero_stream = [_]u8{
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const padded_without_payload = [_]u8{
+        0x00, 0x00, 0x00,
+        0x00, 0x08, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const excessive_padding = [_]u8{
+        0x00, 0x00, 0x02,
+        0x00, 0x08, 0x00,
+        0x00, 0x00, 0x01,
+        0x02, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, Data.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, Data.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, Data.init(&extra_payload));
+    try std.testing.expectError(error.ProtocolError, Data.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, Data.init(&zero_stream));
+    try std.testing.expectError(error.ProtocolError, Data.init(&padded_without_payload));
+    try std.testing.expectError(error.ProtocolError, Data.init(&excessive_padding));
+}
+
+test "headers exposes flags priority and header block fragment" {
+    const fragment = [_]u8{ 0x82, 0x86, 0x84 };
+    const frame = [_]u8{
+        0x00, 0x00, 0x03,
+        0x01, 0x05, 0x00,
+        0x00, 0x00, 0x01,
+    } ++ fragment;
+    const padded_fragment = [_]u8{ 0xaa, 0xbb };
+    const padded_priority_frame = [_]u8{
+        0x00, 0x00, 0x0a,
+        0x01, 0x2d, 0x80,
+        0x00, 0x00, 0x05,
+        0x02, 0x80, 0x00,
+        0x00, 0x03, 0xff,
+    } ++ padded_fragment ++ [_]u8{ 0x00, 0x00 };
+
+    const headers = try Headers.init(&frame);
+    try std.testing.expectEqual(@as(u31, 1), headers.stream_id());
+    try std.testing.expect(headers.is_end_stream());
+    try std.testing.expect(headers.is_end_headers());
+    try std.testing.expect(!headers.is_padded());
+    try std.testing.expect(!headers.has_priority());
+    try std.testing.expectEqual(null, headers.priority());
+    try std.testing.expectEqualSlices(u8, &fragment, headers.header_block_fragment());
+
+    const padded_headers = try Headers.init(&padded_priority_frame);
+    try std.testing.expectEqual(@as(u31, 5), padded_headers.stream_id());
+    try std.testing.expect(padded_headers.is_padded());
+    try std.testing.expect(padded_headers.has_priority());
+    try std.testing.expectEqual(
+        Headers.Priority{
+            .exclusive = true,
+            .stream_dependency = 3,
+            .weight = 256,
+        },
+        padded_headers.priority().?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &padded_fragment,
+        padded_headers.header_block_fragment(),
+    );
+}
+
+test "headers frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x01,
+        0x01, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x00,
+        0x09, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const zero_stream = [_]u8{
+        0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const padded_without_payload = [_]u8{
+        0x00, 0x00, 0x00,
+        0x01, 0x08, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const short_priority = [_]u8{
+        0x00, 0x00, 0x04,
+        0x01, 0x20, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+    const excessive_padding = [_]u8{
+        0x00, 0x00, 0x02,
+        0x01, 0x08, 0x00,
+        0x00, 0x00, 0x01,
+        0x02, 0x00,
+    };
+    const self_dependency = [_]u8{
+        0x00, 0x00, 0x05,
+        0x01, 0x20, 0x00,
+        0x00, 0x00, 0x03,
+        0x80, 0x00, 0x00,
+        0x03, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, Headers.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, Headers.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, Headers.init(&extra_payload));
+    try std.testing.expectError(error.ProtocolError, Headers.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, Headers.init(&zero_stream));
+    try std.testing.expectError(error.ProtocolError, Headers.init(&padded_without_payload));
+    try std.testing.expectError(error.ProtocolError, Headers.init(&short_priority));
+    try std.testing.expectError(error.ProtocolError, Headers.init(&excessive_padding));
+    try std.testing.expectError(error.ProtocolError, Headers.init(&self_dependency));
+}
+
+test "continuation exposes flags and header block fragment" {
+    const empty_frame = [_]u8{
+        0x00, 0x00, 0x00,
+        0x09, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const fragment = [_]u8{ 0x82, 0x86, 0x84 };
+    const frame = [_]u8{
+        0x00, 0x00, 0x03,
+        0x09, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+    } ++ fragment;
+
+    const empty_continuation = try Continuation.init(&empty_frame);
+    try std.testing.expectEqual(@as(u31, 1), empty_continuation.stream_id());
+    try std.testing.expect(!empty_continuation.is_end_headers());
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{},
+        empty_continuation.header_block_fragment(),
+    );
+
+    const continuation = try Continuation.init(&frame);
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), continuation.stream_id());
+    try std.testing.expect(continuation.is_end_headers());
+    try std.testing.expectEqualSlices(
+        u8,
+        &fragment,
+        continuation.header_block_fragment(),
+    );
+}
+
+test "continuation frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x01,
+        0x09, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x00,
+        0x09, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const zero_stream = [_]u8{
+        0x00, 0x00, 0x00,
+        0x09, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, Continuation.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, Continuation.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, Continuation.init(&extra_payload));
+    try std.testing.expectError(error.ProtocolError, Continuation.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, Continuation.init(&zero_stream));
 }
