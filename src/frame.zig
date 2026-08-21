@@ -418,7 +418,7 @@ pub const Headers = struct {
         return self.frame[4] & FLAG_PRIORITY != 0;
     }
 
-    pub fn priority(self: Headers) ?Priority {
+    pub fn priority(self: Headers) ?Headers.Priority {
         if (!self.hasPriority()) {
             return null;
         }
@@ -503,6 +503,151 @@ pub const Continuation = struct {
 
     pub fn headerBlockFragment(self: Continuation) []const u8 {
         return self.frame[FRAME_LEN..];
+    }
+};
+
+pub const PushPromise = struct {
+    const FLAG_END_HEADERS: u8 = 0x04;
+    const FLAG_PADDED: u8 = 0x08;
+    const PROMISED_STREAM_ID_LEN: usize = 4;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !PushPromise {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validateFrameType(.push_promise, frame);
+
+        const payload_len = parsePayloadLen(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (parseStreamId(frame) == 0) {
+            return error.ProtocolError;
+        }
+
+        const push_promise: PushPromise = .{ .frame = frame };
+        const fields_len = push_promise.prefixLen();
+        if (payload_len < fields_len) {
+            return error.FrameSizeError;
+        }
+
+        if (push_promise.paddingLen() > payload_len - fields_len) {
+            return error.ProtocolError;
+        }
+
+        if (push_promise.promisedStreamId() == 0) {
+            return error.ProtocolError;
+        }
+
+        return push_promise;
+    }
+
+    pub fn streamId(self: PushPromise) u31 {
+        return parseStreamId(self.frame);
+    }
+
+    pub fn isEndHeaders(self: PushPromise) bool {
+        return self.frame[4] & FLAG_END_HEADERS != 0;
+    }
+
+    pub fn isPadded(self: PushPromise) bool {
+        return self.frame[4] & FLAG_PADDED != 0;
+    }
+
+    pub fn promisedStreamId(self: PushPromise) u31 {
+        const offset = FRAME_LEN + self.paddingPrefixLen();
+        const reserved_plus_stream_id = std.mem.readInt(
+            u32,
+            self.frame[offset..][0..PROMISED_STREAM_ID_LEN],
+            .big,
+        );
+        return @truncate(reserved_plus_stream_id & 0x7fff_ffff);
+    }
+
+    pub fn headerBlockFragment(self: PushPromise) []const u8 {
+        const start = FRAME_LEN + self.prefixLen();
+        const end = self.frame.len - self.paddingLen();
+        return self.frame[start..end];
+    }
+
+    fn prefixLen(self: PushPromise) usize {
+        return self.paddingPrefixLen() + PROMISED_STREAM_ID_LEN;
+    }
+
+    fn paddingPrefixLen(self: PushPromise) usize {
+        if (self.isPadded()) {
+            return 1;
+        }
+        return 0;
+    }
+
+    fn paddingLen(self: PushPromise) usize {
+        if (!self.isPadded()) {
+            return 0;
+        }
+        return self.frame[FRAME_LEN];
+    }
+};
+
+pub const Priority = struct {
+    const DATA_LEN: usize = 5;
+
+    frame: []const u8,
+
+    pub fn init(frame: []const u8) !Priority {
+        if (frame.len < FRAME_LEN) {
+            return error.InvalidFrameLength;
+        }
+
+        try validateFrameType(.priority, frame);
+
+        const payload_len = parsePayloadLen(frame);
+        if (frame.len != FRAME_LEN + payload_len) {
+            return error.InvalidFrameLength;
+        }
+
+        if (payload_len != DATA_LEN) {
+            return error.FrameSizeError;
+        }
+
+        if (parseStreamId(frame) == 0) {
+            return error.ProtocolError;
+        }
+
+        const priority: Priority = .{ .frame = frame };
+        if (priority.streamDependency() == priority.streamId()) {
+            return error.ProtocolError;
+        }
+
+        return priority;
+    }
+
+    pub fn streamId(self: Priority) u31 {
+        return parseStreamId(self.frame);
+    }
+
+    pub fn isExclusive(self: Priority) bool {
+        return self.rawDependency() & 0x8000_0000 != 0;
+    }
+
+    pub fn streamDependency(self: Priority) u31 {
+        return @truncate(self.rawDependency() & 0x7fff_ffff);
+    }
+
+    pub fn weight(self: Priority) u16 {
+        return @as(u16, self.frame[FRAME_LEN + 4]) + 1;
+    }
+
+    fn rawDependency(self: Priority) u32 {
+        return std.mem.readInt(
+            u32,
+            self.frame[FRAME_LEN..][0..4],
+            .big,
+        );
     }
 };
 
@@ -1302,4 +1447,188 @@ test "continuation frame validation works" {
     try std.testing.expectError(error.InvalidFrameLength, Continuation.init(&extra_payload));
     try std.testing.expectError(error.ProtocolError, Continuation.init(&wrong_type));
     try std.testing.expectError(error.ProtocolError, Continuation.init(&zero_stream));
+}
+
+test "push_promise exposes promised stream and header block fragment" {
+    const frame = [_]u8{
+        0x00, 0x00, 0x04,
+        0x05, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x02,
+    };
+    const fragment = [_]u8{ 0x82, 0x86, 0x84 };
+    const padded_frame = [_]u8{
+        0x00, 0x00, 0x0a,
+        0x05, 0x0c, 0x80,
+        0x00, 0x00, 0x01,
+        0x02, 0x80, 0x00,
+        0x00, 0x02,
+    } ++ fragment ++ [_]u8{ 0x00, 0x00 };
+
+    const push_promise = try PushPromise.init(&frame);
+    try std.testing.expectEqual(@as(u31, 1), push_promise.streamId());
+    try std.testing.expectEqual(@as(u31, 2), push_promise.promisedStreamId());
+    try std.testing.expect(!push_promise.isEndHeaders());
+    try std.testing.expect(!push_promise.isPadded());
+    try std.testing.expectEqualSlices(u8, &.{}, push_promise.headerBlockFragment());
+
+    const padded_push_promise = try PushPromise.init(&padded_frame);
+    try std.testing.expectEqual(@as(u31, 1), padded_push_promise.streamId());
+    try std.testing.expectEqual(@as(u31, 2), padded_push_promise.promisedStreamId());
+    try std.testing.expect(padded_push_promise.isEndHeaders());
+    try std.testing.expect(padded_push_promise.isPadded());
+    try std.testing.expectEqualSlices(
+        u8,
+        &fragment,
+        padded_push_promise.headerBlockFragment(),
+    );
+}
+
+test "push_promise frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x05, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x05, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x02, 0x00,
+    };
+    const short_payload = [_]u8{
+        0x00, 0x00, 0x03,
+        0x05, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x02,
+    };
+    const short_padded_payload = [_]u8{
+        0x00, 0x00, 0x04,
+        0x05, 0x08, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x02,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x04,
+        0x01, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x02,
+    };
+    const zero_stream = [_]u8{
+        0x00, 0x00, 0x04,
+        0x05, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x02,
+    };
+    const zero_promised_stream = [_]u8{
+        0x00, 0x00, 0x04,
+        0x05, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x80, 0x00, 0x00,
+        0x00,
+    };
+    const excessive_padding = [_]u8{
+        0x00, 0x00, 0x06,
+        0x05, 0x08, 0x00,
+        0x00, 0x00, 0x01,
+        0x02, 0x00, 0x00,
+        0x00, 0x02, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, PushPromise.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, PushPromise.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, PushPromise.init(&extra_payload));
+    try std.testing.expectError(error.FrameSizeError, PushPromise.init(&short_payload));
+    try std.testing.expectError(error.FrameSizeError, PushPromise.init(&short_padded_payload));
+    try std.testing.expectError(error.ProtocolError, PushPromise.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, PushPromise.init(&zero_stream));
+    try std.testing.expectError(error.ProtocolError, PushPromise.init(&zero_promised_stream));
+    try std.testing.expectError(error.ProtocolError, PushPromise.init(&excessive_padding));
+}
+
+test "priority exposes dependency and weight" {
+    const frame = [_]u8{
+        0x00, 0x00, 0x05,
+        0x02, 0x00, 0x00,
+        0x00, 0x00, 0x03,
+        0x00, 0x00, 0x00,
+        0x01, 0x00,
+    };
+    const exclusive_frame = [_]u8{
+        0x00, 0x00, 0x05,
+        0x02, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+        0x80, 0x00, 0x00,
+        0x00, 0xff,
+    };
+
+    const priority = try Priority.init(&frame);
+    try std.testing.expectEqual(@as(u31, 3), priority.streamId());
+    try std.testing.expect(!priority.isExclusive());
+    try std.testing.expectEqual(@as(u31, 1), priority.streamDependency());
+    try std.testing.expectEqual(@as(u16, 1), priority.weight());
+
+    const exclusive_priority = try Priority.init(&exclusive_frame);
+    try std.testing.expectEqual(@as(u31, 0x7fff_ffff), exclusive_priority.streamId());
+    try std.testing.expect(exclusive_priority.isExclusive());
+    try std.testing.expectEqual(@as(u31, 0), exclusive_priority.streamDependency());
+    try std.testing.expectEqual(@as(u16, 256), exclusive_priority.weight());
+}
+
+test "priority frame validation works" {
+    const too_short = [_]u8{0} ** (FRAME_LEN - 1);
+    const missing_payload = [_]u8{
+        0x00, 0x00, 0x05,
+        0x02, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const extra_payload = [_]u8{
+        0x00, 0x00, 0x05,
+        0x02, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    };
+    const wrong_payload_length = [_]u8{
+        0x00, 0x00, 0x04,
+        0x02, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+    const wrong_type = [_]u8{
+        0x00, 0x00, 0x05,
+        0x03, 0x00, 0x00,
+        0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+    const zero_stream = [_]u8{
+        0x00, 0x00, 0x05,
+        0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x01, 0x00,
+    };
+    const self_dependency = [_]u8{
+        0x00, 0x00, 0x05,
+        0x02, 0x00, 0x00,
+        0x00, 0x00, 0x03,
+        0x80, 0x00, 0x00,
+        0x03, 0x00,
+    };
+
+    try std.testing.expectError(error.InvalidFrameLength, Priority.init(&too_short));
+    try std.testing.expectError(error.InvalidFrameLength, Priority.init(&missing_payload));
+    try std.testing.expectError(error.InvalidFrameLength, Priority.init(&extra_payload));
+    try std.testing.expectError(error.FrameSizeError, Priority.init(&wrong_payload_length));
+    try std.testing.expectError(error.ProtocolError, Priority.init(&wrong_type));
+    try std.testing.expectError(error.ProtocolError, Priority.init(&zero_stream));
+    try std.testing.expectError(error.ProtocolError, Priority.init(&self_dependency));
 }
