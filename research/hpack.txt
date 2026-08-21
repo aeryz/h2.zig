@@ -1,0 +1,51 @@
+
+Hpack:
+1. List of header fields (ordered name-value pairs)
+2. Growable header field tables.
+3. "In the encoded form, a header field is represented either literally
+   or as a reference to a header field in one of the header field
+   tables"
+4. Literal values are either encoded directly or use a static Huffman
+   code.
+5. "The encoder is responsible for deciding which header fields to insert
+   as new entries in the header field tables."
+6. The decoder executes the
+   modifications to the header field tables prescribed by the encoder,
+   reconstructing the list of header fields in the process.
+
+Dyn/static tables:
+---------------------
+7. "the request and response dynamic tables are separate"
+8. dynamic table indices start after the static ones so if static has 40 items,
+dynamic indices start at 41 (yes because static starts at 1)
+9. Dynamic table is FIFO
+10. The first and newest entry in a dynamic table is at the lowest index, and
+the oldest entry of a dynamic table is at the highest index. Meaning the indices
+will change.
+11. The dynamic table can contain duplicate entries (i.e., entries with
+   the same name and same value).  Therefore, duplicate entries MUST NOT
+   be treated as an error by a decoder.
+12. To limit the memory requirements of the decoder, the dynamic table size is
+   strictly bounded.
+
+Header fields and their decoding:
+---------------------------------
+13. The header field name can be represented literally or as a reference
+to an entry in either the static table or the dynamic table.  The header
+field value is represented literally.
+14. There are three different literal reprs:
+	1. The one that adds the header field as a new entry to the dyn table.
+	2. The one that does not add.
+	3. Don't add and never index. (useful for auth tokens and such)
+
+Questions:
+1. what order does the name-value pairs are in (just FIFO maybe?)
+	A: "An encoder MUST order header field representations in the header
+   block according to their ordering in the original header list."
+	A: "A decoder MUST order header fields in the decoded header list according
+   to their ordering in the header block.""
+
+Implementation notes:
+1. Initially don't support Huffman code.
+2. Indices strictly greater than the sum of the lengths of both tables
+   MUST be treated as a decoding error.
