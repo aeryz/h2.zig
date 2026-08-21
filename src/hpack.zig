@@ -121,6 +121,55 @@ pub const HPack = struct {
     }
 };
 
+fn encode_integer_value(
+    comptime N: usize,
+    value: usize,
+    prefix: u8,
+    buffer: []u8,
+) ?usize {
+    comptime {
+        if (N == 0 or N > 7) {
+            @compileError("N must be in 1..7");
+        }
+    }
+
+    if (buffer.len == 0) {
+        return null;
+    }
+
+    const mask: usize = (@as(usize, 1) << N) - 1;
+
+    if (value < mask) {
+        buffer[0] = prefix | @as(u8, @intCast(value));
+        return 1;
+    }
+
+    buffer[0] = prefix | @as(u8, @intCast(mask));
+
+    var remaining = value - mask;
+    var i: usize = 1;
+
+    while (remaining >= 128) {
+        if (i >= buffer.len) {
+            return null;
+        }
+
+        buffer[i] =
+            @as(u8, @intCast(remaining & 0b0111_1111)) |
+            0b1000_0000;
+
+        remaining >>= 7;
+        i += 1;
+    }
+
+    if (i >= buffer.len) {
+        return null;
+    }
+
+    buffer[i] = @intCast(remaining);
+    return i + 1;
+}
+
 fn decode_integer_value(comptime N: usize, buffer: []const u8) ?usize {
     comptime {
         if (N > 7) {
@@ -140,6 +189,7 @@ fn decode_integer_value(comptime N: usize, buffer: []const u8) ?usize {
 
     var shift: usize = 0;
 
+    // TODO: this should be simd-able but I don't know simd
     for (buffer[1..]) |byte| {
         const chunk = @as(usize, byte & 0b0111_1111);
 
@@ -159,6 +209,9 @@ fn decode_integer_value(comptime N: usize, buffer: []const u8) ?usize {
     return null;
 }
 
+const testing = std.testing;
+const expectEqual = testing.expectEqual;
+
 test "dynamic table inserts from front" {
     const allocator = std.testing.allocator;
     var table = try DynamicTable.init(allocator);
@@ -172,16 +225,16 @@ test "dynamic table inserts from front" {
         .value = first_string,
     });
 
-    try std.testing.expectEqual(first_string, table.list.at(0).name);
+    try expectEqual(first_string, table.list.at(0).name);
 
     try table.push(.{
         .name = second_string,
         .value = second_string,
     });
 
-    try std.testing.expectEqual(4 * 10 + 32 * 2, table.current_len);
-    try std.testing.expectEqual(second_string, table.list.at(0).name);
-    try std.testing.expectEqual(first_string, table.list.at(1).name);
+    try expectEqual(4 * 10 + 32 * 2, table.current_len);
+    try expectEqual(second_string, table.list.at(0).name);
+    try expectEqual(first_string, table.list.at(1).name);
 }
 
 test "dynamic table evicts from the back" {
@@ -209,9 +262,9 @@ test "dynamic table evicts from the back" {
     });
 
     // len is 2 because the first string is evicted
-    try std.testing.expectEqual(2, table.list.len);
-    try std.testing.expectEqual(&third_string, table.list.at(0).name);
-    try std.testing.expectEqual(&second_string, table.list.at(1).name);
+    try expectEqual(2, table.list.len);
+    try expectEqual(&third_string, table.list.at(0).name);
+    try expectEqual(&second_string, table.list.at(1).name);
 }
 
 test "decode integer value - 1337" {
@@ -221,8 +274,42 @@ test "decode integer value - 1337" {
         0b0000_1010,
     };
 
-    try std.testing.expectEqual(
+    try expectEqual(
         @as(?usize, 1337),
         decode_integer_value(5, &encoded),
+    );
+}
+
+test "encode integer value - 1337" {
+    var buffer: [16]u8 = undefined;
+
+    const len = encode_integer_value(
+        5,
+        1337,
+        0,
+        &buffer,
+    ).?;
+
+    try expectEqual(@as(usize, 3), len);
+
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{
+            0b0001_1111,
+            0b1001_1010,
+            0b0000_1010,
+        },
+        buffer[0..len],
+    );
+}
+
+test "integer encode/decode round trip" {
+    var buffer: [16]u8 = undefined;
+
+    const len = encode_integer_value(5, 1337, 0, &buffer).?;
+
+    try expectEqual(
+        @as(?usize, 1337),
+        decode_integer_value(5, buffer[0..len]),
     );
 }
