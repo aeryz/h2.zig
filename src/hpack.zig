@@ -76,6 +76,16 @@ const STATIC_TABLE = [_]HeaderField{
     .{ .name = "www-authenticate", .value = "" },
 };
 
+const Decoder = struct {
+    max_table_size: usize,
+
+    pub fn init(max_table_size: usize) Decoder {
+        return .{
+            .max_table_size = max_table_size,
+        };
+    }
+};
+
 // TODO: still not sure if we could manage to
 const DynamicTableList = std.Deque(HeaderField);
 
@@ -86,7 +96,11 @@ const DynamicTable = struct {
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) !DynamicTable {
-        return .{ .list = try DynamicTableList.initCapacity(allocator, DEFAULT_MAX_LEN / 32), .current_len = 0, .allocator = allocator };
+        return .{
+            .list = try DynamicTableList.initCapacity(allocator, DEFAULT_MAX_LEN / 32),
+            .current_len = 0,
+            .allocator = allocator,
+        };
     }
 
     pub fn push(self: *DynamicTable, item: HeaderField) !void {
@@ -170,7 +184,7 @@ fn encode_integer_value(
     return i + 1;
 }
 
-fn decode_integer_value(comptime N: usize, buffer: []const u8) ?usize {
+fn decode_integer_value(comptime N: usize, buffer: []const u8, out_val: *usize) usize {
     comptime {
         if (N > 7) {
             @compileError("N must be < 8");
@@ -178,13 +192,14 @@ fn decode_integer_value(comptime N: usize, buffer: []const u8) ?usize {
     }
 
     if (buffer.len == 0) {
-        return null;
+        return 0;
     }
 
     const mask = (@as(usize, 1) << N) - 1;
     var val = mask & @as(usize, buffer[0]);
     if (val != mask) {
-        return val;
+        out_val.* = val;
+        return 1;
     }
 
     var shift: usize = 0;
@@ -196,17 +211,32 @@ fn decode_integer_value(comptime N: usize, buffer: []const u8) ?usize {
         val += chunk << @intCast(shift);
 
         if (byte & 0b1000_0000 == 0) {
-            return val;
+            out_val.* = val;
+            return shift / 7 + 2;
         }
 
         shift += 7;
 
         if (shift >= @bitSizeOf(usize)) {
-            return null;
+            return 0;
         }
     }
 
-    return null;
+    return 0;
+}
+
+fn decode_string_value(buffer: []const u8) ?[]const u8 {
+    if (buffer.len == 0) {
+        return null;
+    }
+
+    var str_len: usize = undefined;
+    const n_bytes = decode_integer_value(7, buffer, &str_len);
+    if (n_bytes == 0) {
+        return null;
+    }
+
+    return buffer[n_bytes..(n_bytes + str_len)];
 }
 
 const testing = std.testing;
@@ -274,10 +304,9 @@ test "decode integer value - 1337" {
         0b0000_1010,
     };
 
-    try expectEqual(
-        @as(?usize, 1337),
-        decode_integer_value(5, &encoded),
-    );
+    var val: usize = undefined;
+    _ = decode_integer_value(5, &encoded, &val);
+    try expectEqual(@as(?usize, 1337), val);
 }
 
 test "encode integer value - 1337" {
@@ -308,8 +337,61 @@ test "integer encode/decode round trip" {
 
     const len = encode_integer_value(5, 1337, 0, &buffer).?;
 
-    try expectEqual(
-        @as(?usize, 1337),
-        decode_integer_value(5, buffer[0..len]),
-    );
+    var int: usize = undefined;
+    _ = decode_integer_value(5, buffer[0..len], &int);
+    try expectEqual(@as(?usize, 1337), int);
+}
+
+test "string literal no-huffman decoding works" {
+    // "hello"
+    const hello = [_]u8{
+        0b0000_0101,
+        'h',
+        'e',
+        'l',
+        'l',
+        'o',
+    };
+    try testing.expectEqualSlices(u8, "hello", decode_string_value(&hello).?);
+
+    // "content-type"
+    const content_type = [_]u8{
+        0b0000_1100, // 12 bytes
+        'c',
+        'o',
+        'n',
+        't',
+        'e',
+        'n',
+        't',
+        '-',
+        't',
+        'y',
+        'p',
+        'e',
+    };
+    try testing.expectEqualSlices(u8, "content-type", decode_string_value(&content_type).?);
+
+    // "application/json"
+    const application_json = [_]u8{
+        0b0001_0000, // 16 bytes
+        'a',
+        'p',
+        'p',
+        'l',
+        'i',
+        'c',
+        'a',
+        't',
+        'i',
+        'o',
+        'n',
+        '/',
+        'j',
+        's',
+        'o',
+        'n',
+    };
+
+    try testing.expectEqualSlices(u8, "application/json", decode_string_value(&application_json).?);
 }
