@@ -1,5 +1,7 @@
 pub const frame = @import("frame.zig");
 pub const hpack = @import("hpack.zig");
+pub const types = @import("types.zig");
+pub const DynamicTable = @import("dynamic_table.zig");
 
 const ErrorCode = enum {
     NoError,
