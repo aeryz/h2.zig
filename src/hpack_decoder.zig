@@ -273,7 +273,8 @@ test "decoder decodes" {
     };
 }
 
-const expectEqual = std.testing.expectEqual;
+const testing = std.testing;
+const expectEqual = testing.expectEqual;
 
 test "decode integer value - 1337" {
     const encoded = [_]u8{
@@ -285,4 +286,66 @@ test "decode integer value - 1337" {
     var val: usize = undefined;
     _ = Decoder.decode_integer_value(5, &encoded, &val);
     try expectEqual(@as(?usize, 1337), val);
+}
+
+test "string literal no-huffman decoding works" {
+    // "hello"
+    const hello = [_]u8{
+        0b0000_0101,
+        'h',
+        'e',
+        'l',
+        'l',
+        'o',
+    };
+    try testing.expectEqualSlices(u8, "hello", Decoder.decode_string_value(&hello).?);
+
+    // "content-type"
+    const content_type = [_]u8{
+        0b0000_1100, // 12 bytes
+        'c',
+        'o',
+        'n',
+        't',
+        'e',
+        'n',
+        't',
+        '-',
+        't',
+        'y',
+        'p',
+        'e',
+    };
+    try testing.expectEqualSlices(
+        u8,
+        "content-type",
+        Decoder.decode_string_value(&content_type).?,
+    );
+
+    // "application/json"
+    const application_json = [_]u8{
+        0b0001_0000, // 16 bytes
+        'a',
+        'p',
+        'p',
+        'l',
+        'i',
+        'c',
+        'a',
+        't',
+        'i',
+        'o',
+        'n',
+        '/',
+        'j',
+        's',
+        'o',
+        'n',
+    };
+
+    try testing.expectEqualSlices(
+        u8,
+        "application/json",
+        Decoder.decode_string_value(&application_json).?,
+    );
 }
