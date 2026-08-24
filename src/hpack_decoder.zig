@@ -100,7 +100,7 @@ const Decoder = struct {
             return null;
         }
 
-        return buffer[n_bytes..(n_bytes + str_len)];
+        return .{ .borrowed = buffer[n_bytes..(n_bytes + str_len)] };
     }
 
     fn decode_integer_value(comptime N: usize, buffer: []const u8, out_val: *usize) usize {
@@ -298,7 +298,11 @@ test "string literal no-huffman decoding works" {
         'l',
         'o',
     };
-    try testing.expectEqualSlices(u8, "hello", Decoder.decode_string_value(&hello).?);
+    try testing.expectEqualSlices(
+        u8,
+        "hello",
+        Decoder.decode_string_value(&hello).?.borrowed,
+    );
 
     // "content-type"
     const content_type = [_]u8{
@@ -319,7 +323,7 @@ test "string literal no-huffman decoding works" {
     try testing.expectEqualSlices(
         u8,
         "content-type",
-        Decoder.decode_string_value(&content_type).?,
+        Decoder.decode_string_value(&content_type).?.borrowed,
     );
 
     // "application/json"
@@ -346,6 +350,6 @@ test "string literal no-huffman decoding works" {
     try testing.expectEqualSlices(
         u8,
         "application/json",
-        Decoder.decode_string_value(&application_json).?,
+        Decoder.decode_string_value(&application_json).?.borrowed,
     );
 }
