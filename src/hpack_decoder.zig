@@ -154,60 +154,77 @@ const DecoderIterator = struct {
             return null;
         }
 
-        var used = 0;
+        var used: usize = 0;
 
-        if (self.remaining[0] & 0b1 == 0b1) {
-            var index: usize = undefined;
-            used = Decoder.decode_integer_value(7, self.remaining, &index);
-            if (index == 0) {
-                // decode error
+        const ret: ?HeaderFieldView = blk: {
+            if ((self.remaining[0] & 0b1000_0000) == 0b1000_0000) {
+                std.debug.print("111111111\n", .{});
+                var index: usize = undefined;
+                used = Decoder.decode_integer_value(7, self.remaining, &index);
+                if (index == 0) {
+                    // decode error
+                    return null;
+                }
+
+                const item = if (index > STATIC_TABLE.len)
+                    self.dynamic_table.get(index).?
+                else
+                    &STATIC_TABLE[index - 1];
+
+                break :blk .{
+                    .type = .indexed,
+                    .name = .{ .borrowed = item.name },
+                    .value = .{ .borrowed = item.value },
+                };
+            } else if ((self.remaining[0] & 0b1100_0000) == 0b0100_0000) {
+                var header_view: HeaderFieldView = .{
+                    .type = .literal_with_indexing,
+                    .name = undefined,
+                    .value = undefined,
+                };
+                used = self.decode_header_field_repr(6, self.remaining, &header_view);
+
+                // TODO: lifetime issue, need to alloc. but we can't simply
+                // alloc here (maybe?) because there's also huffman
+                self.dynamic_table.push(header_view) catch {};
+
+                break :blk header_view;
+            } else if ((self.remaining[0] & 0b1111_0000) == 0b0000_0000) {
+                var header_view: HeaderFieldView = .{
+                    .type = .literal_without_indexing,
+                    .name = undefined,
+                    .value = undefined,
+                };
+                used = self.decode_header_field_repr(4, self.remaining, &header_view);
+
+                break :blk header_view;
+            } else if ((self.remaining[0] & 0b1111_0000) == 0b0001_0000) {
+                var header_view: HeaderFieldView = .{
+                    .type = .literal_never_indexed,
+                    .name = undefined,
+                    .value = undefined,
+                };
+                used = self.decode_header_field_repr(4, self.remaining, &header_view);
+
+                self.remaining = self.remaining[used..];
+
+                break :blk header_view;
+            } else if ((self.remaining[0] & 0b1110_0000) == 0b0010_0000) {
+                var max_cap: usize = undefined;
+                used = Decoder.decode_integer_value(5, self.remaining, &max_cap) - 1;
+                self.dynamic_table.set_max_capacity(max_cap);
+
+                break :blk self.next();
+            } else {
+                // ERROR
                 return null;
             }
+        };
 
-            const item = if (index > STATIC_TABLE.len) self.dynamic_table.get(index).? else &STATIC_TABLE[index];
-
-            return .{
-                .type = .indexed,
-                .name = .{ .borrowed = item.name },
-                .value = .{ .borrowed = item.value },
-            };
-        } else if (self.remaining[0] & 0b11 == 0b01) {
-            // Literal Header Field with Incremental Indexing
-
-            var header_view: HeaderFieldView = .{ .type = .literal_with_indexing };
-            used = self.decode_header_field_repr(6, self.remaining, &header_view);
-
-            // TODO: lifetime issue, need to alloc. but we can't simply
-            // alloc here (maybe?) because there's also huffman
-            self.dynamic_table.add(header_view);
-
-            self.remaining = self.remaining[used..];
-
-            return header_view;
-        } else if (self.remaining[0] & 0b1111 == 0b0000) {
-            var header_view: HeaderFieldView = .{ .type = .literal_without_indexing };
-            used = self.decode_header_field_repr(4, self.remaining, &header_view);
-
-            self.remaining = self.remaining[used..];
-
-            return header_view;
-        } else if (self.remaining[0] & 0b1111 == 0b0001) {
-            var header_view: HeaderFieldView = .{ .type = .literal_never_indexed };
-            used = self.decode_header_field_repr(4, self.remaining, &header_view);
-
-            self.remaining = self.remaining[used..];
-
-            return header_view;
-        } else if (self.remaining[0] & 0b111 == 0b001) {
-            var max_cap: usize = undefined;
-            used = Decoder.decode_integer_value(5, self.remaining, &max_cap) - 1;
-            self.dynamic_table.set_max_capacity(max_cap);
-
-            return self.next();
-        }
+        self.remaining = self.remaining[used..];
 
         // decode error
-        return null;
+        return ret;
     }
 
     fn decode_header_field_repr(
@@ -216,10 +233,10 @@ const DecoderIterator = struct {
         buffer: []const u8,
         header_field: *HeaderFieldView,
     ) usize {
-        var used = 0;
+        var used: usize = 0;
 
         var idx: usize = undefined;
-        used += Decoder.decode_integer_value(N, buffer[0], &idx) - 1;
+        used += Decoder.decode_integer_value(N, buffer, &idx) - 1;
         const name: Cow = if (idx == 0)
             Decoder.decode_string_value(buffer[used + 1 ..]).?
         else if (idx > STATIC_TABLE.len)
@@ -227,10 +244,10 @@ const DecoderIterator = struct {
         else
             .{ .borrowed = STATIC_TABLE[idx - 1].name };
 
-        used += name.len;
+        used += name.len();
 
         const value = Decoder.decode_string_value(buffer[used..]).?;
-        used += value.len;
+        used += value.len();
 
         self.remaining = self.remaining[used..];
 
@@ -241,36 +258,52 @@ const DecoderIterator = struct {
     }
 };
 
-test "decoder decodes" {
-    _ = [_]u8{
-        0x82, // :method: GET        (static table index 2)
-        0x87, // :scheme: https      (static table index 7)
-        0x84, // :path: /            (static table index 4)
+test "indexed header field decode" {
+    // RFC 7541 Section 6.1: an indexed representation has a one-bit prefix.
+    // Index 2 selects ":method: GET" from the static table.
+    const encoded = [_]u8{0x82};
 
-        // Literal Header Field with Incremental Indexing
-        // indexed name: :authority (static table index 1)
-        0x41,
+    var dynamic_table = try DynamicTable.init(testing.allocator);
+    defer dynamic_table.deinit();
 
-        // value length = 15, Huffman bit = 0
-        0x0f,
-
-        // "www.example.com"
-        'w',
-        'w',
-        'w',
-        '.',
-        'e',
-        'x',
-        'a',
-        'm',
-        'p',
-        'l',
-        'e',
-        '.',
-        'c',
-        'o',
-        'm',
+    var decoder: DecoderIterator = .{
+        .remaining = &encoded,
+        .dynamic_table = &dynamic_table,
     };
+
+    const header = decoder.next().?;
+    try expectEqual(.indexed, header.type);
+    try testing.expectEqualStrings(":method", header.name.borrowed);
+    try testing.expectEqualStrings("GET", header.value.borrowed);
+    try expectEqual(@as(usize, 0), decoder.remaining.len);
+}
+
+test "literal header field with incremental indexing decode" {
+    const encoded =
+        // Literal name "custom-key", followed by value "custom-value".
+        "\x40\x0a" ++ "custom-key" ++ "\x0c" ++ "custom-value" ++
+        // Static-table name index 1 (:authority), followed by value "example.com".
+        "\x41\x0b" ++ "example.com";
+
+    var dynamic_table = try DynamicTable.init(testing.allocator);
+    defer dynamic_table.deinit();
+
+    var decoder: DecoderIterator = .{
+        .remaining = encoded,
+        .dynamic_table = &dynamic_table,
+    };
+
+    const literal_name_header = decoder.next().?;
+    try expectEqual(.literal_with_indexing, literal_name_header.type);
+    try testing.expectEqualStrings("custom-key", literal_name_header.name.borrowed);
+    try testing.expectEqualStrings("custom-value", literal_name_header.value.borrowed);
+
+    const indexed_name_header = decoder.next().?;
+    try expectEqual(.literal_with_indexing, indexed_name_header.type);
+    try testing.expectEqualStrings(":authority", indexed_name_header.name.borrowed);
+    try testing.expectEqualStrings("example.com", indexed_name_header.value.borrowed);
+
+    try expectEqual(@as(usize, 0), decoder.remaining.len);
 }
 
 const testing = std.testing;
