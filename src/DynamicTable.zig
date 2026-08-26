@@ -44,6 +44,8 @@ pub fn push(self: *DynamicTable, header_view: HeaderFieldView) !void {
         while (current_len > desired_len) {
             const pop_item = self.list.popBack().?;
             current_len -= pop_item.len();
+            self.allocator.free(pop_item.name);
+            self.allocator.free(pop_item.value);
         }
         self.current_len = current_len;
     }
@@ -59,6 +61,10 @@ pub fn get(_: *DynamicTable, _: usize) ?*HeaderField {
 pub fn set_max_capacity(_: *DynamicTable, _: usize) void {}
 
 pub fn deinit(self: *DynamicTable) void {
+    while (self.list.popFront()) |header| {
+        self.allocator.free(header.name);
+        self.allocator.free(header.value);
+    }
     self.list.deinit(self.allocator);
 }
 

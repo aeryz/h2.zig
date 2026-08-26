@@ -89,27 +89,36 @@ const Decoder = struct {
 
     pub fn start_decoding() DecoderIterator {}
 
-    fn decode_string_value(buffer: []const u8) ?Cow {
+    fn decode_string_value(buffer: []const u8) !struct { usize, Cow } {
         if (buffer.len == 0) {
-            return null;
+            return error.Decoding;
         }
 
         var str_len: usize = undefined;
         const n_bytes = decode_integer_value(7, buffer, &str_len);
         if (n_bytes == 0) {
-            return null;
+            return error.Decoding;
         }
 
-        return .{ .borrowed = buffer[n_bytes..(n_bytes + str_len)] };
+        if (str_len > buffer.len - n_bytes) {
+            return error.Decoding;
+        }
+        const used = n_bytes + str_len;
+
+        return .{
+            used,
+            .{ .borrowed = buffer[n_bytes..used] },
+        };
     }
 
     fn decode_integer_value(comptime N: usize, buffer: []const u8, out_val: *usize) usize {
         comptime {
-            if (N > 7) {
-                @compileError("N must be < 8");
+            if (N == 0 or N > 8) {
+                @compileError("N must be in the range 1...8");
             }
         }
 
+        out_val.* = 0;
         if (buffer.len == 0) {
             return 0;
         }
@@ -123,11 +132,18 @@ const Decoder = struct {
 
         var shift: usize = 0;
 
-        // TODO: this should be simd-able but I don't know simd
+        const max_int: usize = std.math.maxInt(usize);
         for (buffer[1..]) |byte| {
             const chunk = @as(usize, byte & 0b0111_1111);
+            if (chunk > max_int >> @intCast(shift)) {
+                return 0;
+            }
 
-            val += chunk << @intCast(shift);
+            const addend = chunk << @intCast(shift);
+            if (val > max_int - addend) {
+                return 0;
+            }
+            val += addend;
 
             if (byte & 0b1000_0000 == 0) {
                 out_val.* = val;
@@ -149,7 +165,7 @@ const DecoderIterator = struct {
     remaining: []const u8,
     dynamic_table: *DynamicTable,
 
-    pub fn next(self: *DecoderIterator) ?HeaderFieldView {
+    pub fn next(self: *DecoderIterator) !?HeaderFieldView {
         if (self.remaining.len == 0) {
             return null;
         }
@@ -158,7 +174,6 @@ const DecoderIterator = struct {
 
         const ret: ?HeaderFieldView = blk: {
             if ((self.remaining[0] & 0b1000_0000) == 0b1000_0000) {
-                std.debug.print("111111111\n", .{});
                 var index: usize = undefined;
                 used = Decoder.decode_integer_value(7, self.remaining, &index);
                 if (index == 0) {
@@ -182,7 +197,7 @@ const DecoderIterator = struct {
                     .name = undefined,
                     .value = undefined,
                 };
-                used = self.decode_header_field_repr(6, self.remaining, &header_view);
+                used = try self.decode_header_field_repr(6, self.remaining, &header_view);
 
                 // TODO: lifetime issue, need to alloc. but we can't simply
                 // alloc here (maybe?) because there's also huffman
@@ -195,7 +210,7 @@ const DecoderIterator = struct {
                     .name = undefined,
                     .value = undefined,
                 };
-                used = self.decode_header_field_repr(4, self.remaining, &header_view);
+                used = try self.decode_header_field_repr(4, self.remaining, &header_view);
 
                 break :blk header_view;
             } else if ((self.remaining[0] & 0b1111_0000) == 0b0001_0000) {
@@ -204,17 +219,19 @@ const DecoderIterator = struct {
                     .name = undefined,
                     .value = undefined,
                 };
-                used = self.decode_header_field_repr(4, self.remaining, &header_view);
-
-                self.remaining = self.remaining[used..];
+                used = try self.decode_header_field_repr(4, self.remaining, &header_view);
 
                 break :blk header_view;
             } else if ((self.remaining[0] & 0b1110_0000) == 0b0010_0000) {
                 var max_cap: usize = undefined;
-                used = Decoder.decode_integer_value(5, self.remaining, &max_cap) - 1;
+                const decoded_bytes = Decoder.decode_integer_value(5, self.remaining, &max_cap);
+                if (decoded_bytes == 0) {
+                    return null;
+                }
+                used = decoded_bytes - 1;
                 self.dynamic_table.set_max_capacity(max_cap);
 
-                break :blk self.next();
+                break :blk try self.next();
             } else {
                 // ERROR
                 return null;
@@ -232,24 +249,32 @@ const DecoderIterator = struct {
         comptime N: usize,
         buffer: []const u8,
         header_field: *HeaderFieldView,
-    ) usize {
+    ) !usize {
         var used: usize = 0;
 
         var idx: usize = undefined;
-        used += Decoder.decode_integer_value(N, buffer, &idx) - 1;
-        const name: Cow = if (idx == 0)
-            Decoder.decode_string_value(buffer[used + 1 ..]).?
-        else if (idx > STATIC_TABLE.len)
-            .{ .borrowed = self.dynamic_table.get(idx).?.name }
-        else
-            .{ .borrowed = STATIC_TABLE[idx - 1].name };
+        used += Decoder.decode_integer_value(N, buffer, &idx);
 
-        used += name.len();
+        const name: Cow = switch (idx) {
+            0 => blk: {
+                const n_bytes, const name = try Decoder.decode_string_value(buffer[used..]);
+                used += n_bytes;
+                break :blk name;
+            },
+            1...STATIC_TABLE.len => .{
+                .borrowed = STATIC_TABLE[idx - 1].name,
+            },
+            else => blk: {
+                if (idx > STATIC_TABLE.len + self.dynamic_table.current_len)
+                    return error.Decode;
+                break :blk .{
+                    .borrowed = self.dynamic_table.get(idx).?.name,
+                };
+            },
+        };
 
-        const value = Decoder.decode_string_value(buffer[used..]).?;
-        used += value.len();
-
-        self.remaining = self.remaining[used..];
+        const n_bytes, const value = try Decoder.decode_string_value(buffer[used..]);
+        used += n_bytes;
 
         header_field.name = name;
         header_field.value = value;
@@ -257,6 +282,33 @@ const DecoderIterator = struct {
         return used;
     }
 };
+
+test "decode string literal" {
+    const strings = .{
+        .{
+            "www.example.com",
+            &[_]u8{ 0x0f, 'w', 'w', 'w', '.', 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm' },
+        },
+        .{
+            "a",
+            &[_]u8{
+                0x01,
+                'a',
+            },
+        },
+        .{
+            "",
+            &[_]u8{
+                0x00,
+            },
+        },
+    };
+
+    inline for (strings) |s| {
+        _, const decoded = try Decoder.decode_string_value(s[1]);
+        try testing.expectEqualSlices(u8, s[0], decoded.borrowed);
+    }
+}
 
 test "indexed header field decode" {
     // RFC 7541 Section 6.1: an indexed representation has a one-bit prefix.
@@ -271,7 +323,7 @@ test "indexed header field decode" {
         .dynamic_table = &dynamic_table,
     };
 
-    const header = decoder.next().?;
+    const header = (try decoder.next()).?;
     try expectEqual(.indexed, header.type);
     try testing.expectEqualStrings(":method", header.name.borrowed);
     try testing.expectEqualStrings("GET", header.value.borrowed);
@@ -293,12 +345,12 @@ test "literal header field with incremental indexing decode" {
         .dynamic_table = &dynamic_table,
     };
 
-    const literal_name_header = decoder.next().?;
+    const literal_name_header = (try decoder.next()).?;
     try expectEqual(.literal_with_indexing, literal_name_header.type);
     try testing.expectEqualStrings("custom-key", literal_name_header.name.borrowed);
     try testing.expectEqualStrings("custom-value", literal_name_header.value.borrowed);
 
-    const indexed_name_header = decoder.next().?;
+    const indexed_name_header = (try decoder.next()).?;
     try expectEqual(.literal_with_indexing, indexed_name_header.type);
     try testing.expectEqualStrings(":authority", indexed_name_header.name.borrowed);
     try testing.expectEqualStrings("example.com", indexed_name_header.value.borrowed);
@@ -331,11 +383,16 @@ test "string literal no-huffman decoding works" {
         'l',
         'o',
     };
-    try testing.expectEqualSlices(
-        u8,
-        "hello",
-        Decoder.decode_string_value(&hello).?.borrowed,
-    );
+
+    {
+        _, const decoded =
+            try Decoder.decode_string_value(&hello);
+        try testing.expectEqualSlices(
+            u8,
+            "hello",
+            decoded.borrowed,
+        );
+    }
 
     // "content-type"
     const content_type = [_]u8{
@@ -353,11 +410,16 @@ test "string literal no-huffman decoding works" {
         'p',
         'e',
     };
-    try testing.expectEqualSlices(
-        u8,
-        "content-type",
-        Decoder.decode_string_value(&content_type).?.borrowed,
-    );
+
+    {
+        _, const decoded =
+            try Decoder.decode_string_value(&content_type);
+        try testing.expectEqualSlices(
+            u8,
+            "content-type",
+            decoded.borrowed,
+        );
+    }
 
     // "application/json"
     const application_json = [_]u8{
@@ -380,9 +442,14 @@ test "string literal no-huffman decoding works" {
         'n',
     };
 
-    try testing.expectEqualSlices(
-        u8,
-        "application/json",
-        Decoder.decode_string_value(&application_json).?.borrowed,
-    );
+    {
+        _, const decoded =
+            try Decoder.decode_string_value(&application_json);
+
+        try testing.expectEqualSlices(
+            u8,
+            "application/json",
+            decoded.borrowed,
+        );
+    }
 }
