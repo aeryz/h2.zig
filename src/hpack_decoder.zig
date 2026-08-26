@@ -71,19 +71,6 @@ const STATIC_TABLE = [_]HeaderField{
     .{ .name = "www-authenticate", .value = "" },
 };
 
-// encoding:
-// - header_field -> union(liteal | ref to the table)
-// - [header_field] -> "literal", ref, ref, "literal"...
-//
-// !encoder is responsible for deciding which header fields to insert
-// as new entries in the header field tables
-//
-// decoder executes the
-// modifications to the header field tables prescribed by the encoder,
-//
-// Meaning:
-// encoder -> insert this boss -> decoder -> ok boss
-
 const Decoder = struct {
     dynamic_table: DynamicTable,
 
@@ -355,6 +342,64 @@ test "literal header field with incremental indexing decode" {
     try testing.expectEqualStrings(":authority", indexed_name_header.name.borrowed);
     try testing.expectEqualStrings("example.com", indexed_name_header.value.borrowed);
 
+    try expectEqual(@as(usize, 0), decoder.remaining.len);
+}
+
+test "literal header field without indexing decode" {
+    const encoded =
+        // Literal name "custom-key", followed by value "custom-value".
+        "\x00\x0a" ++ "custom-key" ++ "\x0c" ++ "custom-value" ++
+        // Static-table name index 1 (:authority), followed by value "example.com".
+        "\x01\x0b" ++ "example.com";
+
+    var dynamic_table = try DynamicTable.init(testing.allocator);
+    defer dynamic_table.deinit();
+
+    var decoder: DecoderIterator = .{
+        .remaining = encoded,
+        .dynamic_table = &dynamic_table,
+    };
+
+    const literal_name_header = (try decoder.next()).?;
+    try expectEqual(.literal_without_indexing, literal_name_header.type);
+    try testing.expectEqualStrings("custom-key", literal_name_header.name.borrowed);
+    try testing.expectEqualStrings("custom-value", literal_name_header.value.borrowed);
+
+    const indexed_name_header = (try decoder.next()).?;
+    try expectEqual(.literal_without_indexing, indexed_name_header.type);
+    try testing.expectEqualStrings(":authority", indexed_name_header.name.borrowed);
+    try testing.expectEqualStrings("example.com", indexed_name_header.value.borrowed);
+
+    try expectEqual(@as(usize, 0), dynamic_table.current_len);
+    try expectEqual(@as(usize, 0), decoder.remaining.len);
+}
+
+test "literal header field never indexed decode" {
+    const encoded =
+        // Literal name "custom-key", followed by value "custom-value".
+        "\x10\x0a" ++ "custom-key" ++ "\x0c" ++ "custom-value" ++
+        // Static-table name index 1 (:authority), followed by value "example.com".
+        "\x11\x0b" ++ "example.com";
+
+    var dynamic_table = try DynamicTable.init(testing.allocator);
+    defer dynamic_table.deinit();
+
+    var decoder: DecoderIterator = .{
+        .remaining = encoded,
+        .dynamic_table = &dynamic_table,
+    };
+
+    const literal_name_header = (try decoder.next()).?;
+    try expectEqual(.literal_never_indexed, literal_name_header.type);
+    try testing.expectEqualStrings("custom-key", literal_name_header.name.borrowed);
+    try testing.expectEqualStrings("custom-value", literal_name_header.value.borrowed);
+
+    const indexed_name_header = (try decoder.next()).?;
+    try expectEqual(.literal_never_indexed, indexed_name_header.type);
+    try testing.expectEqualStrings(":authority", indexed_name_header.name.borrowed);
+    try testing.expectEqualStrings("example.com", indexed_name_header.value.borrowed);
+
+    try expectEqual(@as(usize, 0), dynamic_table.current_len);
     try expectEqual(@as(usize, 0), decoder.remaining.len);
 }
 
